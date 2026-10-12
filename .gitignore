@@ -1,0 +1,24 @@
+# Local state may include personal paths or native custom settings.
+state*.json
+config*.toml
+auth.json
+credentials*
+*.key
+*.pem
+.env
+.env.*
+.codex/
+config-switcher-backups/
+backups/
+*.bak
+*.backup
+*.tmp
+*.log
+*.lnk
+*.pdb
+*.build.exe
+preview*.png
+ui-validation.json
+work/
+dist/
+

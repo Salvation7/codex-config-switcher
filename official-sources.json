@@ -1,0 +1,21 @@
+{
+  "checked_on": "2026-10-13",
+  "catalogs": {
+    "glm": {
+      "source": "https://docs.bigmodel.cn/cn/coding-plan/tool/codex",
+      "sha256": "cfad690a7358ce091b90ddd0703198583cc89a0c5ee58f4b9837f9e3709fc1c1",
+      "models": [
+        "glm-5.3",
+        "glm-5-turbo"
+      ]
+    },
+    "deepseek": {
+      "source": "https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex/",
+      "sha256": "de4ad942f695937006cd7b7da87315ad7762e180e2d59472a890e31f6d0b2a51",
+      "models": [
+        "deepseek-flash",
+        "deepseek-v4-pro"
+      ]
+    }
+  }
+}
