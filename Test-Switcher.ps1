@@ -9,6 +9,7 @@ if ([string]::IsNullOrWhiteSpace($EnginePath)) { $EnginePath = Join-Path $PSScri
 $script:Passed = 0
 $script:Failures = New-Object 'System.Collections.Generic.List[string]'
 $script:SecretValues = @('TEST_GLM_SECRET_7d156ee4', 'TEST_DEEPSEEK_SECRET_907db226')
+$script:ExtraSecretValues = @('TEST_EXTRA_kimi', 'TEST_EXTRA_minimax', 'TEST_EXTRA_mimo', 'TEST_EXTRA_aliyun')
 $script:TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-switcher-tests-' + [guid]::NewGuid().ToString('N'))
 $script:FixtureNumber = 0
 
@@ -30,7 +31,7 @@ function Assert-Contains {
 function Assert-NoSecret {
     param($Value, [string]$Message)
     $serialized = $Value | ConvertTo-Json -Depth 30 -Compress
-    foreach ($secret in $script:SecretValues) {
+    foreach ($secret in ($script:SecretValues + $script:ExtraSecretValues)) {
         Assert-True (-not $serialized.Contains($secret)) $Message
     }
 }
@@ -96,7 +97,7 @@ function New-Fixture {
     $appDirectory = Join-Path $directory 'app'
     $catalogDirectory = Join-Path $appDirectory 'catalogs'
     $null = New-Item -ItemType Directory -Path $catalogDirectory -Force
-    foreach ($catalogName in @('glm.json', 'deepseek.json')) {
+    foreach ($catalogName in @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'catalogs') -Filter '*.json' -File | Select-Object -ExpandProperty Name)) {
         $source = Join-Path (Join-Path $PSScriptRoot 'catalogs') $catalogName
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw ('Production catalog is missing: ' + $catalogName)
@@ -688,6 +689,85 @@ memories = true
             Assert-True ([IO.File]::Exists((Get-CodexExecutable))) 'The desktop launcher cannot locate the installed Codex executable.'
             Test-CodexConfiguration -Text $script:FixtureText
         } finally { $env:PATH = $oldPath }
+    }
+
+    Invoke-Test 'Every bundled catalog matches its recorded official source hash' {
+        $sources = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'official-sources.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($property in $sources.catalogs.PSObject.Properties) {
+            $path = Join-Path $PSScriptRoot ('catalogs\' + $property.Name + '.json')
+            Assert-Equal $property.Value.sha256 (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() 'An official model catalog was changed.'
+        }
+        $mimo = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'catalogs\mimo.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ([bool]@($mimo.models | Where-Object slug -eq 'mimo-v2.6-pro')[0].use_responses_lite) 'MiMo official lite-mode capability was lost.'
+    }
+
+    Invoke-Test 'All four extra providers save and switch using the existing transaction path' {
+        $fixture = New-Fixture
+        foreach ($definition in $script:ExtraProviders) {
+            $mode = $definition.mode
+            $null = Save-ProviderConfiguration -Mode $mode -ApiKey ('TEST_EXTRA_' + $mode) -Model $definition.default_model -Effort $definition.default_effort -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+            $null = Switch-CodexProfile -Mode $mode -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+            $text = [IO.File]::ReadAllText($fixture.ConfigPath)
+            $root = Get-RootSettings $text
+            Assert-Equal $mode (Get-SwitcherStatus $fixture.ConfigPath).Mode 'The selected provider was not recognized.'
+            Assert-Equal $definition.default_model (ConvertFrom-TomlScalar $root['model']) 'The selected official model was not written.'
+            $provider = Get-ProviderSettings -Text $text -ProviderId $definition.provider_id
+            Assert-Equal $definition.base_url (ConvertFrom-TomlScalar $provider['base_url']) 'The official API endpoint was not used.'
+            Assert-Equal '"responses"' $provider['wire_api'] 'A legacy or translated protocol was selected.'
+            Assert-True (-not $root.Contains('forced_login_method')) 'An extra provider forced logout from native authentication.'
+            foreach ($property in $definition.root_settings.PSObject.Properties) { Assert-Equal $property.Value $root[$property.Name] 'An official provider setting was not applied.' }
+            Assert-PreservedContent $text
+            Assert-NoSecret ([IO.File]::ReadAllText((Join-Path $fixture.AppDirectory 'state.json'))) 'A new provider leaked its key into state.'
+            $null = Switch-CodexProfile -Mode native -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+            $restored = Get-RootSettings ([IO.File]::ReadAllText($fixture.ConfigPath))
+            $original = Get-RootSettings $fixture.Original
+            foreach ($key in $script:SwitcherRootKeys) { Assert-Equal $original[$key] $restored[$key] 'An extra provider setting remained in native mode.' }
+        }
+    }
+
+    Invoke-Test 'New providers reject foreign catalog models before changing any files' {
+        foreach ($definition in $script:ExtraProviders) {
+            $fixture = New-Fixture
+            $failed = $false
+            try { $null = Save-ProviderConfiguration -Mode $definition.mode -ApiKey ('TEST_EXTRA_' + $definition.mode) -Model 'not-in-this-official-catalog' -Effort $definition.default_effort -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory } catch { $failed = $true }
+            Assert-True $failed 'An unsupported model was accepted.'
+            Assert-Equal $fixture.Original ([IO.File]::ReadAllText($fixture.ConfigPath)) 'Invalid model setup changed configuration.'
+            Assert-True (-not [IO.File]::Exists((Join-Path $fixture.AppDirectory 'state.json'))) 'Invalid model setup created state.'
+        }
+    }
+
+    Invoke-Test 'MiMo pay-as-you-go entry rejects subscription credentials before writing' {
+        $fixture = New-Fixture
+        $failed = $false
+        try { $null = Save-ProviderConfiguration -Mode mimo -ApiKey 'tp-FIXTURE_ONLY' -Model 'mimo-v2.6-pro' -Effort high -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory } catch { $failed = $true }
+        Assert-True $failed 'MiMo subscription credentials were accepted for the pay-as-you-go endpoint.'
+        Assert-Equal $fixture.Original ([IO.File]::ReadAllText($fixture.ConfigPath)) 'Rejected credentials changed configuration.'
+    }
+
+    Invoke-Test 'An existing key is not silently reused across extra-provider endpoints' {
+        $fixture = New-Fixture
+        $text = $fixture.Original + "`n[model_providers.minimax]`nbase_url = `"https://api.minimax.io/v1`"`nexperimental_bearer_token = `"TEST_EXTRA_minimax`"`nwire_api = `"responses`"`n"
+        [IO.File]::WriteAllText($fixture.ConfigPath, $text)
+        $failed = $false
+        try { $null = Save-ProviderConfiguration -Mode minimax -ApiKey '' -Model 'MiniMax-M3.1-Flash-Preview' -Effort max -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory } catch { $failed = $true }
+        Assert-True $failed 'A key for another endpoint was silently reused.'
+        Assert-Equal $text ([IO.File]::ReadAllText($fixture.ConfigPath)) 'Changing endpoints without a key modified configuration.'
+    }
+
+    Invoke-Test 'Version two upgrade preserves an existing native reasoning-summary flag' {
+        $fixture = New-Fixture
+        $text = 'model_supports_reasoning_summaries = false' + "`n" + $fixture.Original
+        [IO.File]::WriteAllText($fixture.ConfigPath, $text)
+        $state = Initialize-Switcher -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+        foreach ($definition in $script:ExtraProviders) { $state.PSObject.Properties.Remove($definition.mode) }
+        $native = Get-SettingsMap $state.Native
+        $native.Remove('model_supports_reasoning_summaries')
+        $state.Native = $native
+        Write-SwitcherState -AppDirectory $fixture.AppDirectory -State $state
+        $null = Save-ProviderConfiguration -Mode mimo -ApiKey 'TEST_EXTRA_mimo' -Model 'mimo-v2.6-pro' -Effort high -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+        $null = Switch-CodexProfile -Mode mimo -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+        $null = Switch-CodexProfile -Mode native -ConfigPath $fixture.ConfigPath -AppDirectory $fixture.AppDirectory
+        Assert-Equal 'false' (Get-RootSettings ([IO.File]::ReadAllText($fixture.ConfigPath)))['model_supports_reasoning_summaries'] 'The native reasoning flag was not restored after upgrade.'
     }
 
     Write-Host ('Results: ' + $script:Passed + ' passed, ' + $script:Failures.Count + ' failed.')

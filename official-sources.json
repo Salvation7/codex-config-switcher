@@ -16,6 +16,51 @@
         "deepseek-flash",
         "deepseek-v4-pro"
       ]
+    },
+    "kimi": {
+      "source": "https://www.kimi.com/code/docs/third-party-tools/codex.html",
+      "sha256": "49379631f95cc7dca15f4b9821035315b7da35e19a36f81ec87c95087ffe3255",
+      "models": [
+        "k3",
+        "k3-256k"
+      ]
+    },
+    "minimax": {
+      "source": "https://platform.minimax.cn/docs/m-plan/codex",
+      "sha256": "79af3ace06e4e0cd1c1f02f65900405ed70eb65cbeb58aa7bf4d7999d979ba58",
+      "models": [
+        "MiniMax-M3.1-Flash-Preview"
+      ]
+    },
+    "mimo": {
+      "source": "https://mimo.mi.com/docs/zh-CN/tokenplan/integration/codex-configuration",
+      "sha256": "8834dc34d879b8489b7376a5a1788f0d1b696f8410fc2df3544ad38ab145601a",
+      "models": [
+        "mimo-v2.6-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro-ultraspeed",
+        "mimo-v2.5-pro",
+        "mimo-v2.5"
+      ],
+      "download": "https://example-files.cnbj1.mi-fds.com/example-files/configs/model-catalogs.json"
+    },
+    "aliyun": {
+      "source": "https://help.aliyun.com/zh/model-studio/codex",
+      "sha256": "687bf38c4ff4f41e6907b52802f5c57f3ab38129004652996dc5d34dc7003c51",
+      "models": [
+        "auto",
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "glm-5.3",
+        "glm-5.2",
+        "deepseek-v4.1-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro-0813",
+        "deepseek-v4-flash-0731"
+      ]
     }
   }
 }

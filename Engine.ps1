@@ -6,9 +6,39 @@ $script:SwitcherRootKeys = @(
     'profile', 'oss_provider', 'openai_base_url', 'model_context_window', 'model_auto_compact_token_limit',
     'model_auto_compact_token_limit_scope', 'base_instructions', 'model_instructions_file', 'compact_prompt',
     'experimental_compact_prompt_file', 'model_verbosity', 'model_reasoning_summary',
-    'plan_mode_reasoning_effort', 'experimental_use_unified_exec_tool'
+    'plan_mode_reasoning_effort', 'experimental_use_unified_exec_tool', 'model_supports_reasoning_summaries'
 )
 $script:DesktopEfforts = '["low", "medium", "high", "xhigh", "ultra", "max"]'
+$script:ExtraProviders = @()
+$definitionPath = Join-Path $PSScriptRoot 'providers.json'
+if (Test-Path -LiteralPath $definitionPath) {
+    $script:ExtraProviders = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $definitionPath -Raw -Encoding UTF8)
+}
+
+function Get-ExtraProvider {
+    param([string]$Mode)
+    return ($script:ExtraProviders | Where-Object { $_.mode -ceq $Mode } | Select-Object -First 1)
+}
+
+function Initialize-ExtraProfiles {
+    param($State, [string]$Text)
+    # Version 2 remains backward compatible: only add optional, credential-free choices.
+    if (-not $State.PSObject.Properties['kimi']) {
+        $root = Get-RootSettings -Text $Text
+        $native = Get-SettingsMap -Object $State.Native
+        if ($root.Contains('model_supports_reasoning_summaries') -and -not $native.Contains('model_supports_reasoning_summaries')) {
+            $native['model_supports_reasoning_summaries'] = $root['model_supports_reasoning_summaries']
+            $State.Native = $native
+        }
+    }
+    foreach ($definition in $script:ExtraProviders) {
+        if (-not $State.PSObject.Properties[$definition.mode]) {
+            $State | Add-Member -NotePropertyName $definition.mode -NotePropertyValue ([pscustomobject]@{
+                Model = $definition.default_model; Effort = $definition.default_effort
+            })
+        }
+    }
+}
 
 function ConvertTo-TomlString {
     param([AllowEmptyString()][string]$Value)
@@ -264,6 +294,7 @@ function Initialize-Switcher {
         }
         if ($state.Version -ne 2) { throw 'Unsupported switcher state version.' }
         if ($state.ConfigPath -ine [IO.Path]::GetFullPath($ConfigPath)) { throw 'This switcher belongs to a different CODEX_HOME. Native settings were not applied.' }
+        Initialize-ExtraProfiles -State $state -Text ([IO.File]::ReadAllText($ConfigPath))
         return $state
     }
     $root = Get-RootSettings -Text ([IO.File]::ReadAllText($ConfigPath))
@@ -278,6 +309,7 @@ function Initialize-Switcher {
         Glm = [pscustomobject]@{ Model = 'glm-5.3'; Effort = 'max' }
         Deepseek = [pscustomobject]@{ Model = 'deepseek-flash'; Effort = 'high' }
     }
+    Initialize-ExtraProfiles -State $state -Text ([IO.File]::ReadAllText($ConfigPath))
     Write-SwitcherState -AppDirectory $AppDirectory -State $state
     return $state
 }
@@ -334,10 +366,13 @@ function Test-CodexConfiguration {
 
 function Get-OfficialProviderSettings {
     param([string]$Mode, [string]$Text)
-    $id = Resolve-ProviderId -Text $Text -PreferredId $(if ($Mode -eq 'glm') { 'ZAI' } else { 'deepseek' })
+    $extra = Get-ExtraProvider -Mode $Mode
+    $preferredId = if ($extra) { $extra.provider_id } elseif ($Mode -eq 'glm') { 'ZAI' } else { 'deepseek' }
+    $baseUrl = if ($extra) { $extra.base_url } elseif ($Mode -eq 'glm') { 'https://open.bigmodel.cn/api/v1' } else { 'https://api.deepseek.com/' }
+    $id = Resolve-ProviderId -Text $Text -PreferredId $preferredId
     return ,([ordered]@{
         name = ConvertTo-TomlString $id
-        base_url = ConvertTo-TomlString $(if ($Mode -eq 'glm') { 'https://open.bigmodel.cn/api/v1' } else { 'https://api.deepseek.com/' })
+        base_url = ConvertTo-TomlString $baseUrl
         wire_api = '"responses"'
         supports_websockets = $null
         requires_openai_auth = $null
@@ -350,6 +385,7 @@ function Get-SwitcherStatus {
     $provider = if ($root.Contains('model_provider')) { ConvertFrom-TomlScalar $root['model_provider'] } else { 'openai' }
     $model = if ($root.Contains('model')) { ConvertFrom-TomlScalar $root['model'] } else { '(default)' }
     $mode = switch ($provider.ToLowerInvariant()) { 'openai' { 'native' }; 'zai' { 'glm' }; 'deepseek' { 'deepseek' }; default { 'other' } }
+    foreach ($definition in $script:ExtraProviders) { if ($provider -ieq $definition.provider_id) { $mode = $definition.mode; break } }
     return [pscustomobject]@{ Mode = $mode; Model = $model; Provider = $provider }
 }
 
@@ -367,6 +403,19 @@ function Test-ProviderConfigured {
         }
     }
     return $false
+}
+
+function Test-ProviderReady {
+    param([string]$Mode, [string]$Text)
+    $settings = Get-OfficialProviderSettings -Mode $Mode -Text $Text
+    $id = ConvertFrom-TomlScalar $settings['name']
+    if (-not (Test-ProviderConfigured -Text $Text -ProviderId $id)) { return $false }
+    if (Get-ExtraProvider -Mode $Mode) {
+        $existing = Get-ProviderSettings -Text $Text -ProviderId $id
+        if (-not $existing.Contains('base_url')) { return $false }
+        return ((ConvertFrom-TomlScalar $existing['base_url']).TrimEnd('/') -ceq (ConvertFrom-TomlScalar $settings['base_url']).TrimEnd('/'))
+    }
+    return $true
 }
 
 function Write-CodexConfigSafely {
@@ -394,7 +443,7 @@ function Get-SwitcherMutex {
 }
 
 function Switch-CodexProfile {
-    param([ValidateSet('native', 'glm', 'deepseek')][string]$Mode, [string]$ConfigPath, [string]$AppDirectory)
+    param([ValidateSet('native', 'glm', 'deepseek', 'kimi', 'minimax', 'mimo', 'aliyun')][string]$Mode, [string]$ConfigPath, [string]$AppDirectory)
     $mutex = Get-SwitcherMutex -ConfigPath $ConfigPath
     $acquired = $false
     try {
@@ -412,10 +461,11 @@ function Switch-CodexProfile {
             $settings = Get-SettingsMap -Object $state.Native
             $desktop = Get-SettingsMap -Object $state.NativeDesktop
         } else {
-            $providerId = if ($Mode -eq 'glm') { 'ZAI' } else { 'deepseek' }
+            $extra = Get-ExtraProvider -Mode $Mode
+            $providerId = if ($extra) { $extra.provider_id } elseif ($Mode -eq 'glm') { 'ZAI' } else { 'deepseek' }
             $providerId = Resolve-ProviderId -Text $original -PreferredId $providerId
-            if (-not (Test-ProviderConfigured -Text $original -ProviderId $providerId)) { throw ('API_KEY_REQUIRED:' + $Mode) }
-            $profile = if ($Mode -eq 'glm') { $state.Glm } else { $state.Deepseek }
+            if (-not (Test-ProviderReady -Mode $Mode -Text $original)) { throw ('API_KEY_REQUIRED:' + $Mode) }
+            $profile = if ($extra) { $state.$Mode } elseif ($Mode -eq 'glm') { $state.Glm } else { $state.Deepseek }
             $catalogPath = Join-Path $AppDirectory ('catalogs\' + $Mode + '.json')
             if (-not [IO.File]::Exists($catalogPath)) { throw ('Model catalog not found: ' + $catalogPath) }
             $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogPath | ConvertFrom-Json
@@ -430,6 +480,10 @@ function Switch-CodexProfile {
                 web_search = '"disabled"'
             }
             $desktop = Get-SettingsMap -Object $state.NativeDesktop
+            if ($extra) {
+                foreach ($property in $extra.root_settings.PSObject.Properties) { $settings[$property.Name] = [string]$property.Value }
+                if (@($extra.desktop_efforts).Count -gt 0) { $desktop['enabled-reasoning-efforts'] = ConvertTo-Json -InputObject @($extra.desktop_efforts) -Compress }
+            }
             if ($Mode -eq 'deepseek') {
                 $settings['preferred_auth_method'] = '"apikey"'
                 $settings['show_raw_agent_reasoning'] = 'true'
@@ -439,7 +493,8 @@ function Switch-CodexProfile {
             }
         }
         $candidate = Set-RootSettings -Text $original -Settings $settings
-        $preserveDesktop = if ($Mode -eq 'deepseek') { $true } else { [bool]$state.NativeDesktopExists }
+        $extraDesktop = $Mode -ne 'native' -and $null -ne (Get-ExtraProvider -Mode $Mode) -and @((Get-ExtraProvider -Mode $Mode).desktop_efforts).Count -gt 0
+        $preserveDesktop = if ($Mode -eq 'deepseek' -or $extraDesktop) { $true } else { [bool]$state.NativeDesktopExists }
         $candidate = Set-DesktopSettings -Text $candidate -Settings $desktop -PreserveEmptyTable $preserveDesktop
         if ($Mode -ne 'native') { $candidate = Set-ProviderSettings -Text $candidate -ProviderId $providerId -Settings (Get-OfficialProviderSettings -Mode $Mode -Text $candidate) }
         $verifiedRoot = Get-RootSettings -Text $candidate
@@ -458,9 +513,11 @@ function Switch-CodexProfile {
 }
 
 function Save-ProviderConfiguration {
-    param([ValidateSet('glm', 'deepseek')][string]$Mode, [string]$ApiKey, [string]$Model, [string]$Effort, [string]$ConfigPath, [string]$AppDirectory)
-    $providerId = if ($Mode -eq 'glm') { 'ZAI' } else { 'deepseek' }
+    param([ValidateSet('glm', 'deepseek', 'kimi', 'minimax', 'mimo', 'aliyun')][string]$Mode, [string]$ApiKey, [string]$Model, [string]$Effort, [string]$ConfigPath, [string]$AppDirectory)
+    $extra = Get-ExtraProvider -Mode $Mode
+    $providerId = if ($extra) { $extra.provider_id } elseif ($Mode -eq 'glm') { 'ZAI' } else { 'deepseek' }
     if ($ApiKey -match '[\r\n]') { throw 'An API key cannot contain line breaks.' }
+    if ($Mode -eq 'mimo' -and $ApiKey -match '^(?:tp|ttp)-') { throw 'This MiMo entry requires a pay-as-you-go API key, not a Token Plan key.' }
     $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $AppDirectory ('catalogs\' + $Mode + '.json')) | ConvertFrom-Json
     $modelEntry = @($catalog.models | Where-Object { $_.slug -eq $Model })
     if ($modelEntry.Count -ne 1) { throw 'Select a model listed in the catalog.' }
@@ -476,9 +533,9 @@ function Save-ProviderConfiguration {
         if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
             $settings['experimental_bearer_token'] = ConvertTo-TomlString $ApiKey.Trim()
             $settings['env_key'] = $null
-        } elseif (-not (Test-ProviderConfigured -Text $original -ProviderId $providerId)) { throw 'An API key is required for first-time setup.' }
+        } elseif (-not (Test-ProviderReady -Mode $Mode -Text $original)) { throw 'An API key is required for first-time setup or when changing the API endpoint.' }
         $candidate = Set-ProviderSettings -Text $original -ProviderId $providerId -Settings $settings
-        $profile = if ($Mode -eq 'glm') { $state.Glm } else { $state.Deepseek }
+        $profile = if ($extra) { $state.$Mode } elseif ($Mode -eq 'glm') { $state.Glm } else { $state.Deepseek }
         $profile.Model = $Model
         $profile.Effort = $Effort
         Test-CodexConfiguration -Text $candidate

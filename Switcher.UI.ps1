@@ -24,6 +24,7 @@ public static class SwitcherDpi {
 $script:SwitcherAppDirectory = $PSScriptRoot
 $script:SwitcherConfigPath = Join-Path $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }) 'config.toml'
 $script:ModeNames = @{ native = '原生'; glm = 'GLM'; deepseek = 'DeepSeek'; other = '其他' }
+foreach ($definition in $script:ExtraProviders) { $script:ModeNames[$definition.mode] = $definition.name }
 $script:ModeButtons = @{}
 $script:ModeBadges = @{}
 $script:MainForm = $null
@@ -102,6 +103,7 @@ function Show-SwitcherError {
     elseif ($message -match 'does not support') { $message = '该模型不支持所选思考强度，请重新选择。' }
     elseif ($message -match 'Codex rejected') { $message = 'Codex 未通过配置校验，原文件未修改。请检查重复表、TOML 语法或旧版配置项。' }
     elseif ($message -match 'different CODEX_HOME') { $message = '程序保存的原生设置属于另一个配置目录，本次没有写入。' }
+    elseif ($message -match 'pay-as-you-go') { $message = 'MiMo 此入口使用按量 API，请填写对应的 API Key；不能使用 Token Plan 订阅 Key。' }
     $message = $message -replace '(?i)sk-[A-Za-z0-9_.-]+', '[已隐藏]'
     [Windows.MessageBox]::Show($script:MainForm, $message, '未能完成操作', 'OK', 'Error') | Out-Null
 }
@@ -110,7 +112,7 @@ function Update-SwitcherView {
     $status = Get-SwitcherStatus -ConfigPath $script:SwitcherConfigPath
     $script:MainForm.FindName('CurrentMode').Text = '已配置 · ' + $script:ModeNames[$status.Mode]
     $script:MainForm.FindName('CurrentModel').Text = $status.Model
-    foreach ($mode in @('native', 'deepseek', 'glm')) {
+    foreach ($mode in $script:ModeButtons.Keys) {
         $button = $script:ModeButtons[$mode]
         $active = $status.Mode -eq $mode
         $button.Background = Get-SwitcherBrush $(if ($active) { '#EFF8F3' } else { '#FFFFFF' })
@@ -118,6 +120,10 @@ function Update-SwitcherView {
         $button.Foreground = Get-SwitcherBrush $(if ($active) { '#175D42' } else { '#22313C' })
         $script:ModeBadges[$mode].Visibility = if ($active) { 'Visible' } else { 'Hidden' }
     }
+    $extraActive = $null -ne (Get-ExtraProvider -Mode $status.Mode)
+    $script:MainForm.FindName('OtherBadge').Text = if ($extraActive) { $script:ModeNames[$status.Mode] + ' · 当前配置' } else { '点击展开' }
+    $script:MainForm.FindName('OtherButton').Background = Get-SwitcherBrush $(if ($extraActive) { '#EFF8F3' } else { '#FFFFFF' })
+    if ($extraActive) { $script:MainForm.FindName('ExtrasPanel').Visibility = 'Visible' }
 }
 
 function Update-ProviderEfforts {
@@ -149,9 +155,10 @@ function Invoke-ProviderSave {
 }
 
 function Show-ProviderSetup {
-    param([ValidateSet('glm', 'deepseek')][string]$Mode, [switch]$PreviewOnly)
+    param([ValidateSet('glm', 'deepseek', 'kimi', 'minimax', 'mimo', 'aliyun')][string]$Mode, [switch]$PreviewOnly)
     $state = Initialize-Switcher -ConfigPath $script:SwitcherConfigPath -AppDirectory $script:SwitcherAppDirectory
-    $profile = if ($Mode -eq 'glm') { $state.Glm } else { $state.Deepseek }
+    $extra = Get-ExtraProvider -Mode $Mode
+    $profile = if ($extra) { $state.$Mode } elseif ($Mode -eq 'glm') { $state.Glm } else { $state.Deepseek }
     $dialog = New-SwitcherWindow @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="480" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
@@ -162,7 +169,7 @@ function Show-ProviderSetup {
   <Border x:Name="DialogContent" Background="#F7F9FB" Padding="24">
   <StackPanel>
     <TextBlock x:Name="DialogHeading" FontSize="21" FontWeight="SemiBold"/>
-    <TextBlock Text="直连官方接口，保留原生登录。" Foreground="#637481" Margin="0,5,0,22"/>
+    <TextBlock x:Name="ProviderHint" Text="直连官方接口，保留原生登录。" TextWrapping="Wrap" Foreground="#637481" Margin="0,5,0,22"/>
     <TextBlock Text="官方 API 地址" Margin="0,0,0,7"/>
     <TextBox x:Name="ProviderUrl" IsReadOnly="True" Background="#EEF2F5" Foreground="#5B6E7B"/>
     <Grid Margin="0,18,0,0">
@@ -185,7 +192,8 @@ function Show-ProviderSetup {
     $dialog.Owner = $script:MainForm
     $dialog.Title = $script:ModeNames[$Mode] + ' 设置'
     $dialog.FindName('DialogHeading').Text = $script:ModeNames[$Mode] + ' 设置'
-    $dialog.FindName('ProviderUrl').Text = if ($Mode -eq 'glm') { 'https://open.bigmodel.cn/api/v1' } else { 'https://api.deepseek.com/' }
+    $dialog.FindName('ProviderUrl').Text = if ($extra) { $extra.base_url } elseif ($Mode -eq 'glm') { 'https://open.bigmodel.cn/api/v1' } else { 'https://api.deepseek.com/' }
+    if ($extra) { $dialog.FindName('ProviderHint').Text = $extra.note }
     $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:SwitcherAppDirectory ('catalogs\' + $Mode + '.json')) | ConvertFrom-Json
     $controls = @{ Model = $dialog.FindName('ModelBox'); Effort = $dialog.FindName('EffortBox'); Key = $dialog.FindName('KeyBox') }
     $dialog.Tag = [pscustomobject]@{ Mode = $Mode; Catalog = $catalog; Controls = $controls }
@@ -205,8 +213,7 @@ function Invoke-ProfileButton {
     param([string]$Mode)
     try {
         if ($Mode -ne 'native') {
-            $provider = if ($Mode -eq 'glm') { 'ZAI' } else { 'DeepSeek' }
-            if (-not (Test-ProviderConfigured -Text ([IO.File]::ReadAllText($script:SwitcherConfigPath)) -ProviderId $provider)) {
+            if (-not (Test-ProviderReady -Mode $Mode -Text ([IO.File]::ReadAllText($script:SwitcherConfigPath)))) {
                 if (-not (Show-ProviderSetup -Mode $Mode)) { return }
             }
         }
@@ -254,11 +261,12 @@ function Save-UiPreview {
 Initialize-Switcher -ConfigPath $script:SwitcherConfigPath -AppDirectory $script:SwitcherAppDirectory | Out-Null
 $script:MainForm = New-SwitcherWindow @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Codex 配置切换" Width="700" SizeToContent="Height" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen"
+        Title="Codex 配置切换 · 2.2" Width="700" SizeToContent="Height" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13" Foreground="#22313C" Background="#F6F8FA"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType" RenderOptions.ClearTypeHint="Enabled">
   <!-- RESOURCES -->
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
   <Border x:Name="PreviewRoot" Background="#F6F8FA" Padding="26,24">
     <StackPanel>
       <Grid>
@@ -276,29 +284,39 @@ $script:MainForm = New-SwitcherWindow @'
         </StackPanel>
       </Grid>
       <Grid Margin="0,24,0,0">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
         <Button x:Name="NativeButton" Tag="native" Style="{StaticResource ModeButton}" AutomationProperties.Name="切换到原生配置">
           <StackPanel>
-            <TextBlock Text="原生" FontSize="20" FontWeight="SemiBold"/>
-            <TextBlock Text="OpenAI · ChatGPT 账号" Foreground="#637481" FontSize="11" Margin="0,4,0,0"/>
+            <TextBlock Text="原生" FontSize="18" FontWeight="SemiBold"/>
+            <TextBlock Text="OpenAI 官方模型" Foreground="#637481" FontSize="11" Margin="0,4,0,0"/>
             <TextBlock x:Name="NativeBadge" Text="当前配置" Foreground="#267552" FontSize="10" Margin="0,9,0,0"/>
           </StackPanel>
         </Button>
         <Button x:Name="DeepseekButton" Tag="deepseek" Grid.Column="2" Style="{StaticResource ModeButton}" AutomationProperties.Name="切换到 DeepSeek 配置">
           <StackPanel>
-            <TextBlock Text="DeepSeek" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="DeepSeek" FontSize="18" FontWeight="SemiBold"/>
             <TextBlock Text="DeepSeek 官方 API" Foreground="#637481" FontSize="11" Margin="0,4,0,0"/>
             <TextBlock x:Name="DeepseekBadge" Text="当前配置" Foreground="#267552" FontSize="10" Margin="0,9,0,0"/>
           </StackPanel>
         </Button>
         <Button x:Name="GlmButton" Tag="glm" Grid.Column="4" Style="{StaticResource ModeButton}" AutomationProperties.Name="切换到 GLM 配置">
           <StackPanel>
-            <TextBlock Text="GLM" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="GLM" FontSize="18" FontWeight="SemiBold"/>
             <TextBlock Text="智谱官方 API" Foreground="#637481" FontSize="11" Margin="0,4,0,0"/>
             <TextBlock x:Name="GlmBadge" Text="当前配置" Foreground="#267552" FontSize="10" Margin="0,9,0,0"/>
           </StackPanel>
         </Button>
+        <Button x:Name="OtherButton" Grid.Column="6" Style="{StaticResource ModeButton}" AutomationProperties.Name="展开或收起其他模型">
+          <StackPanel>
+            <TextBlock Text="其他模型" FontSize="18" FontWeight="SemiBold"/>
+            <TextBlock Text="更多官方接口" Foreground="#637481" FontSize="11" Margin="0,4,0,0"/>
+            <TextBlock x:Name="OtherBadge" Text="点击展开" Foreground="#267552" FontSize="10" Margin="0,9,0,0"/>
+          </StackPanel>
+        </Button>
       </Grid>
+      <Border x:Name="ExtrasPanel" Visibility="Collapsed" Background="#EDF2F5" CornerRadius="10" Margin="0,12,0,0" Padding="8">
+        <UniformGrid x:Name="ExtrasGrid" Rows="1" Columns="4"/>
+      </Border>
       <TextBlock x:Name="NoticeText" Text="切换前自动备份，插件和 MCP 设置继续保留。" Foreground="#637481" FontSize="12" Margin="0,18,0,0" TextWrapping="Wrap"/>
       <Border BorderBrush="#E5EAEE" BorderThickness="0,1,0,0" Margin="0,20,0,0" Padding="0,12,0,0">
         <Grid>
@@ -312,13 +330,43 @@ $script:MainForm = New-SwitcherWindow @'
       </Border>
     </StackPanel>
   </Border>
+  </ScrollViewer>
 </Window>
 '@
+$script:MainForm.MaxHeight = [Math]::Max(300, [Windows.SystemParameters]::WorkArea.Height - 20)
 foreach ($pair in @(@('native','Native'), @('deepseek','Deepseek'), @('glm','Glm'))) {
     $script:ModeButtons[$pair[0]] = $script:MainForm.FindName($pair[1] + 'Button')
     $script:ModeBadges[$pair[0]] = $script:MainForm.FindName($pair[1] + 'Badge')
     $script:ModeButtons[$pair[0]].Add_Click({ param($sender, $eventArgs) Invoke-ProfileButton -Mode ([string]$sender.Tag) })
 }
+foreach ($definition in $script:ExtraProviders) {
+    $column = New-Object Windows.Controls.StackPanel
+    $column.Margin = '4'
+    $button = New-Object Windows.Controls.Button
+    $button.Style = $script:MainForm.FindResource('ModeButton')
+    $button.Height = 98; $button.Padding = '12,10'; $button.Tag = $definition.mode
+    $content = New-Object Windows.Controls.StackPanel
+    $title = New-Object Windows.Controls.TextBlock
+    $title.Text = $definition.name; $title.FontSize = 17; $title.FontWeight = 'SemiBold'
+    $subtitle = New-Object Windows.Controls.TextBlock
+    $subtitle.Text = $definition.subtitle; $subtitle.FontSize = 10; $subtitle.Margin = '0,5,0,0'; $subtitle.Foreground = Get-SwitcherBrush '#637481'
+    $badge = New-Object Windows.Controls.TextBlock
+    $badge.Text = '当前配置'; $badge.FontSize = 10; $badge.Margin = '0,8,0,0'; $badge.Foreground = Get-SwitcherBrush '#267552'
+    foreach ($item in @($title,$subtitle,$badge)) { [void]$content.Children.Add($item) }
+    $button.Content = $content
+    [Windows.Automation.AutomationProperties]::SetName($button, ('切换到 ' + $definition.name))
+    $button.Add_Click({ param($sender,$eventArgs) Invoke-ProfileButton -Mode ([string]$sender.Tag) })
+    $settings = New-Object Windows.Controls.Button
+    $settings.Style = $script:MainForm.FindResource('LinkButton'); $settings.Content = '设置'; $settings.Tag = $definition.mode
+    $settings.Add_Click({ param($sender,$eventArgs) try { Show-ProviderSetup -Mode ([string]$sender.Tag) | Out-Null } catch { Show-SwitcherError $_ } })
+    [void]$column.Children.Add($button); [void]$column.Children.Add($settings)
+    [void]$script:MainForm.FindName('ExtrasGrid').Children.Add($column)
+    $script:ModeButtons[$definition.mode] = $button; $script:ModeBadges[$definition.mode] = $badge
+}
+$script:MainForm.FindName('OtherButton').Add_Click({
+    $panel = $script:MainForm.FindName('ExtrasPanel')
+    $panel.Visibility = if ($panel.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' }
+})
 $script:MainForm.FindName('DeepseekSettings').Add_Click({ try { Show-ProviderSetup -Mode deepseek | Out-Null } catch { Show-SwitcherError $_ } })
 $script:MainForm.FindName('GlmSettings').Add_Click({ try { Show-ProviderSetup -Mode glm | Out-Null } catch { Show-SwitcherError $_ } })
 $script:MainForm.FindName('CheckSettings').Add_Click({ Show-ConfigurationCheck })
@@ -341,7 +389,11 @@ if ($SmokeTest) {
         $records += [pscustomobject]@{ Scale = $scale; PixelWidth = [int][Math]::Ceiling($root.ActualWidth * $scale); PixelHeight = [int][Math]::Ceiling($root.ActualHeight * $scale) }
     }
     [IO.File]::Copy((Join-Path $PSScriptRoot 'preview-100.png'), (Join-Path $PSScriptRoot 'preview.png'), $true)
-    foreach ($mode in @('glm','deepseek')) {
+    $script:MainForm.FindName('OtherButton').RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Button]::ClickEvent)))
+    if ($script:MainForm.FindName('ExtrasPanel').Visibility -ne 'Visible') { throw 'The other-models button did not expand the second row.' }
+    $script:MainForm.UpdateLayout()
+    foreach ($scale in @(1.0, 1.25, 1.5, 2.0)) { Save-UiPreview -Element $root -Scale $scale -Path (Join-Path $PSScriptRoot ('preview-expanded-' + [int]($scale * 100) + '.png')) }
+    foreach ($mode in @('glm','deepseek','kimi','minimax','mimo','aliyun')) {
         $dialog = Show-ProviderSetup -Mode $mode -PreviewOnly
         $dialog.Opacity = 0; $dialog.ShowInTaskbar = $false; $dialog.ShowActivated = $false
         $dialog.Show(); $dialog.UpdateLayout()
@@ -353,7 +405,9 @@ if ($SmokeTest) {
         $dialog.Close()
     }
     $handle = (New-Object Windows.Interop.WindowInteropHelper($script:MainForm)).Handle
-    $report = [pscustomobject]@{ Renderer = 'WPF'; PerMonitorV2 = [SwitcherDpi]::IsPerMonitorV2($handle); WindowDpi = [SwitcherDpi]::GetDpiForWindow($handle); Buttons = $script:ModeButtons.Count; Previews = $records; SettingsDialogs = 'glm,deepseek'; ConfigWritten = $false }
+    $script:MainForm.FindName('OtherButton').RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Button]::ClickEvent)))
+    if ($script:MainForm.FindName('ExtrasPanel').Visibility -ne 'Collapsed') { throw 'The other-models button did not collapse the second row.' }
+    $report = [pscustomobject]@{ Renderer = 'WPF'; PerMonitorV2 = [SwitcherDpi]::IsPerMonitorV2($handle); WindowDpi = [SwitcherDpi]::GetDpiForWindow($handle); MainButtons = 4; ProviderButtons = $script:ModeButtons.Count; Previews = $records; SettingsDialogs = 'glm,deepseek,kimi,minimax,mimo,aliyun'; ConfigWritten = $false }
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'ui-validation.json'), ($report | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
     Write-Output ($report | ConvertTo-Json -Depth 5 -Compress)
     $script:MainForm.Close()

@@ -4,7 +4,8 @@
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Engine.ps1')
-foreach ($mode in @('glm','deepseek')) {
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'providers.json') -PathType Leaf)) { throw 'Missing provider definitions. Keep the entire application folder together.' }
+foreach ($mode in @('glm','deepseek') + @($script:ExtraProviders | ForEach-Object { $_.mode })) {
     $path = Join-Path $PSScriptRoot ('catalogs\' + $mode + '.json')
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('Missing model catalog: ' + $mode + '. Keep the entire application folder together.') }
     $null = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
@@ -17,7 +18,7 @@ if ($DesktopShortcut) {
     $shortcut.TargetPath = Join-Path $PSScriptRoot 'CodexConfigSwitcher.exe'
     $shortcut.Arguments = ''
     $shortcut.WorkingDirectory = $PSScriptRoot
-    $shortcut.Description = '切换 Codex 原生、DeepSeek 和 GLM 配置'
+    $shortcut.Description = '切换 Codex 原生、DeepSeek、GLM 及其他官方 API 配置'
     $shortcut.IconLocation = (Join-Path $env:WINDIR 'System32\shell32.dll') + ',21'
     $shortcut.Save()
     Write-Output 'Desktop shortcut created.'

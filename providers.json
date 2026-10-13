@@ -1,0 +1,67 @@
+[
+  {
+    "mode": "kimi",
+    "name": "Kimi",
+    "provider_id": "kimi",
+    "base_url": "https://api.kimi.com/coding/v1",
+    "default_model": "k3-256k",
+    "default_effort": "high",
+    "source": "https://www.kimi.com/code/docs/third-party-tools/codex.html",
+    "subtitle": "Kimi Code",
+    "note": "使用 Kimi Code 专用 Key，账号需有对应模型的 Coding 额度。",
+    "root_settings": {
+      "web_search": "\"live\""
+    },
+    "desktop_efforts": [
+      "low",
+      "high",
+      "max"
+    ]
+  },
+  {
+    "mode": "minimax",
+    "name": "MiniMax",
+    "provider_id": "minimax",
+    "base_url": "https://api.minimax.cn/v1",
+    "default_model": "MiniMax-M3.1-Flash-Preview",
+    "default_effort": "max",
+    "source": "https://platform.minimax.cn/docs/m-plan/codex",
+    "subtitle": "国内 API",
+    "note": "使用 MiniMax 国内站 Key；当前仅列官方 Codex 教程提供的模型。",
+    "root_settings": {
+      "model_context_window": "524288",
+      "preferred_auth_method": "\"apikey\""
+    },
+    "desktop_efforts": []
+  },
+  {
+    "mode": "mimo",
+    "name": "MiMo",
+    "provider_id": "mimo",
+    "base_url": "https://api.xiaomimimo.com/v1",
+    "default_model": "mimo-v2.6-pro",
+    "default_effort": "high",
+    "source": "https://mimo.mi.com/docs/zh-CN/tokenplan/integration/codex-configuration",
+    "subtitle": "按量 API",
+    "note": "使用小米 MiMo 按量 API Key；此入口不使用 Token Plan 订阅 Key。",
+    "root_settings": {
+      "model_supports_reasoning_summaries": "true",
+      "model_reasoning_summary": "\"none\"",
+      "model_context_window": "1048576"
+    },
+    "desktop_efforts": []
+  },
+  {
+    "mode": "aliyun",
+    "name": "阿里百炼",
+    "provider_id": "Model_Studio_Token_Plan_Personal",
+    "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "default_model": "auto",
+    "default_effort": "medium",
+    "source": "https://help.aliyun.com/zh/model-studio/codex",
+    "subtitle": "Token Plan 个人",
+    "note": "使用百炼 Token Plan 个人版专用 Key；不适用于旧 Coding Plan、团队版或普通按量 API。",
+    "root_settings": {},
+    "desktop_efforts": []
+  }
+]
